@@ -1,0 +1,16 @@
+{
+    "name": "guiador-digital/generate-laravel-architecture-copilot",
+    "description": "Um pacote Laravel para comandos Artisan que ajudam no desenvolvimento",
+    "autoload": {
+        "psr-4": {
+            "GuiadorDigital\\GenerateLaravelArchitectureCopilot\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "GuiadorDigital\\GenerateLaravelArchitectureCopilot\\GenerateLaravelArchitectureCopilotServiceProvider"
+            ]
+        }
+    }
+}
