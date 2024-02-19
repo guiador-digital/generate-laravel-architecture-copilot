@@ -8,106 +8,135 @@ use Illuminate\Support\Str;
 
 class MakeModelWithFillable extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
-    protected $signature = 'make:custom-seeder {name} {fields}';
+    protected $signature = 'make:model-fields {name} {fields}';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
-    protected $description = 'Command description';
+    protected $description = 'Create model with fields';
 
-    /**
-     * Execute the console command.
-     */
     public function handle()
     {
         $name = $this->argument('name');
         $fields = $this->argument('fields');
 
-        $command = "make:seeder {$name}Seeder";
-        Artisan::call($command);
+        $fieldDefinitions = $this->parseFieldDefinitions($fields);
 
-        $filePath = base_path("database/seeders/{$name}Seeder.php");
+        // Executa o comando 'make:model' para criar a model e a migration
+        Artisan::call("make:model {$name} -m");
 
-        // Verifique se o arquivo existe
-        if (file_exists($filePath)) {
-            // Ler o conteúdo do arquivo
-            $content = file_get_contents($filePath);
+        // Obter o nome da migration gerada
+        $migrationName = 'create_' . Str::snake(Str::pluralStudly($name)) . '_table';
+        $migrationFiles = glob(database_path('migrations/*' . $migrationName . '.php'));
+        $migrationFile = count($migrationFiles) > 0 ? $migrationFiles[0] : null;
 
-            // Percorre e trata os fields
-            $fillable = $fields ? explode(',', $fields) : [];
+        if ($migrationFile) {
+            // Abre o arquivo da migration
+            $migrationContents = file_get_contents($migrationFile);
 
-            $codeToAdd = "";
-            if ($fields) {
-                foreach ($fillable as $value) {
-                    $value = str_replace('*', '', $value);
-                    $value = explode(':', $value)[0];
-                    $codeToAdd .= "'{$value}' => '',\n            ";
-                }
+            // Encontra a posição do fechamento do método up()
+            $pos = strpos($migrationContents, 'id();');
+            if ($pos !== false) {
+                // Insere os campos fillable após o ID na migration
+                $fillableColumns = collect($fieldDefinitions)->map(function ($definition, $column) {
+                    $commandColumnLine = '';
+
+                    // Verifica se o campo é obrigatório
+                    $isRequired = false;
+                    $posRequired = strpos($column, '*');
+                    if ($posRequired != false) {
+                        $isRequired = true;
+                    }
+
+                    // Trata se o campo for foreign key
+                    if ($definition['type'] == 'fk') {
+                        $column = str_replace('*', '', $column);
+                        $commandColumnLine .= "foreignId('{$column}')";
+
+                        if ($isRequired == false) {
+                            $commandColumnLine .= "->nullable()";
+                        }
+
+                        $commandColumnLine .= "->constrained('table')->onUpdate('cascade')->onDelete('cascade');";
+                        return "    \$table->{$commandColumnLine};";
+                    }
+
+                    $column = str_replace('*', '', $column);
+                    $commandColumnLine .= "{$definition['type']}('{$column}')";
+                    if ($isRequired == false) {
+                        $commandColumnLine .= "->nullable()";
+                    }
+
+                    return "    \$table->{$commandColumnLine};";
+                })->implode("\n        ");
+
+                $migrationContents = substr_replace($migrationContents, "id();\n        {$fillableColumns}\n\n        ", $pos, 5);
+
+                $pos = strpos($migrationContents, 'timestamps();');
+                $migrationContents = substr_replace($migrationContents, "timestamps();\n            \$table->softDeletes();", $pos, 13);
             }
 
+            // Salva o arquivo com os campos fillable atualizados
+            file_put_contents($migrationFile, $migrationContents);
 
-            // Adiciona a Model na Seeder
-            $content = str_replace('use Illuminate\Database\Seeder;', "use Illuminate\Database\Seeder;\nuse App\Models\\$name;", $content);
-
-            // Substituir a primeira ocorrência de // pelos campos
-            $contentField = "$name::create([
-            {$codeToAdd}]);\n\n";
-            $content = preg_replace('/\/\//', $contentField, $content, 1);
-
-            // Add a chamada da factory
-            // Encontrar todas as posições das chaves }
-            preg_match_all('/}/', $content, $matches, PREG_OFFSET_CAPTURE);
-
-            // Pegar a penúltima posição da chave }
-            if (count($matches[0]) >= 2) {
-                $lastBracketPos = $matches[0][count($matches[0]) - 2][1];
-
-                // Inserir o conteúdo antes da penúltima chave }
-                $content = substr_replace($content, "\n        $name::factory()->count(50)->create();\n    ", $lastBracketPos, 0);
-
-                // Escrever o conteúdo de volta no arquivo
-                file_put_contents($filePath, $content);
-
-            } else {
-                echo "Não foi possível encontrar a penúltima chave }.";
-            }
-
-            // Escrever o conteúdo de volta no arquivo
-            file_put_contents($filePath, $content);
-
-            // Add in DatabaseSeeder
-            $databaseSeederPath = base_path('database/seeders/DatabaseSeeder.php');
-            $nameSeeder = $name . 'Seeder';
-
-            if (file_exists($databaseSeederPath)) {
-                // Ler o conteúdo do arquivo
-                $content = file_get_contents($databaseSeederPath);
-
-                // Encontrar a posição do comentário
-                $commentPos = strpos($content, '// Add new here');
-
-                if ($commentPos !== false) {
-                    // Inserir a linha antes do comentário
-                    $content = substr_replace($content, "$nameSeeder::class,\n            ", $commentPos, 0);
-
-                    // Escrever o conteúdo de volta no arquivo
-                    file_put_contents($databaseSeederPath, $content);
-                } else {
-                    echo "Comentário não encontrado no arquivo DatabaseSeeder.";
-                }
-            } else {
-                echo "O arquivo DatabaseSeeder.php não foi encontrado.";
-            }
+            $this->info("Campos adicionados com sucesso à migration {$migrationName}.");
         } else {
-            echo "Seeder não foi gerada.";
+            $this->error("Não foi possível encontrar a migration para adicionar os campos.");
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | MODEL
+        |--------------------------------------------------------------------------
+        */
+
+        // Abre o arquivo da model recém-criada
+        $modelFilePath = app_path("Models/{$name}.php");
+        $modelContents = file_get_contents($modelFilePath);
+
+        $modelContents = Str::replaceFirst('class', "use Illuminate\Database\Eloquent\SoftDeletes;\n\nclass", $modelContents);
+
+        // Adiciona os campos fillable na model
+        $fillableDeclaration = !empty($fieldDefinitions) ? "\n    protected \$guarded = ['id'];\n" : "";
+        $fillableDeclaration = str_replace('*', '', $fillableDeclaration);
+        // dd($fieldDefinitions);
+
+        $fks = [];
+
+        foreach ($fieldDefinitions as $key => $value) {
+            if ($value["type"] == 'fk') {
+                array_push($fks, str_replace("*", "", $key));
+            }
+        }
+
+        $todoRememberRelationshipDeclaration = "";
+        foreach ($fks as $value) {
+            $todoRememberRelationshipDeclaration .= "   // TODO fazer relacionamento de {$value}\n";
+        }
+
+        $modelContents = Str::replaceFirst('use HasFactory;', "use HasFactory;\n {$fillableDeclaration}\n\n{$todoRememberRelationshipDeclaration}", $modelContents);
+
+        // Adiciona o uso do SoftDeletes e o softDelete na model
+        $modelContents = Str::replaceFirst('class', "class", $modelContents);
+        $modelContents = Str::replaceFirst('{', "{\n    use SoftDeletes;", $modelContents);
+
+        // Salva o arquivo com os campos fillable atualizados
+        file_put_contents($modelFilePath, $modelContents);
+
+        $this->info("Model $name criada com sucesso.");
+    }
+
+    protected function parseFieldDefinitions($fields)
+    {
+        $definitions = [];
+        $fieldList = explode(',', $fields);
+
+        foreach ($fieldList as $field) {
+            $parts = explode(':', $field, 2);
+            $columnName = $parts[0];
+            $columnType = count($parts) > 1 ? $parts[1] : 'string';
+            $nullable = strpos($columnType, '*') === false ? true : false;
+            $columnType = str_replace('*', '', $columnType); // Remove o *
+            $definitions[$columnName] = ['type' => $columnType, 'nullable' => $nullable];
+        }
+
+        return $definitions;
     }
 }
